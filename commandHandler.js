@@ -240,4 +240,19 @@ async function handle(sock, msg) {
       const me = [sock.user?.id, sock.user?.lid].filter(Boolean).map((j) => j.replace(/:\d+@/, '@'));
       const admins = meta.participants.filter((p) => p.admin);
       ctx.groupMetadata = meta;
-      ctx.isAd
+      ctx.isAdmin = isOwner || admins.some((p) => sameUser(p, sender));
+      ctx.isBotAdmin = admins.some((p) => sameUser(p, me[0], me));
+      if (cmd.adminOnly && !ctx.isAdmin) return reply('Only group admins can use this command.');
+      if (cmd.botAdmin && !ctx.isBotAdmin) return reply('Make me an admin first, then try again.');
+    }
+
+    await cmd.run(ctx);
+    log.info(`[CMD] "${cmd.name}" finished in ${Date.now() - started}ms`);
+    if (cmd.ownerOnly) store.save(settings); // keep owner changes (prefix, bot name, ...)
+  } catch (err) {
+    log.error(`Command "${cmd.name}" failed:`, err);
+    reply('Something went wrong running that command.').catch(() => {});
+  }
+}
+
+module.exports = { loadCommands, handle, warm, commandCount: () => unique.size };
