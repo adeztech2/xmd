@@ -1,0 +1,24 @@
+{
+  "name": "Nexus",
+  "description": "Nexus WhatsApp bot",
+  "repository": "https://github.com/adeztech2/nexus",
+  "keywords": ["whatsapp", "bot", "nodejs"],
+  "stack": "container",
+  "env": {
+    "SESSION_ID": {
+      "description": "Session ID from the pair site (starts with NEXUS~)",
+      "required": true
+    },
+    "OWNER_NUMBER": {
+      "description": "Your number, digits only with country code",
+      "required": true
+    },
+    "SESSION_DIR": { "value": "/tmp/session" },
+    "BOT_NAME": { "value": "Nexus" },
+    "PREFIX": { "value": "." },
+    "MODE": { "value": "public" }
+  },
+  "formation": {
+    "worker": { "quantity": 1, "size": "basic" }
+  }
+}
