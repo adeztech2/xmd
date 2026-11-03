@@ -1,6 +1,9 @@
 FROM node:20-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+# The download commands invoke yt-dlp and ffmpeg directly. Install both in the
+# runtime image so .play/.video/.dl can work after deployment.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates yt-dlp ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -154,6 +154,27 @@ async function notifyConnected(sock) {
   }
 }
 
+// Baileys can report a freshly received DM as either `notify` or `append` while
+// synchronizing linked devices. Deduplicate by message ID so accepting both
+// event types won't execute a command twice.
+const seenMessages = new Map();
+const MESSAGE_DEDUPE_MS = 5 * 60 * 1000;
+function firstDelivery(msg) {
+  const id = msg.key?.id;
+  if (!id) return true;
+  const now = Date.now();
+  const previous = seenMessages.get(id);
+  if (previous && now - previous < MESSAGE_DEDUPE_MS) return false;
+  seenMessages.set(id, now);
+  if (seenMessages.size > 2000) {
+    for (const [key, at] of seenMessages) {
+      if (now - at >= MESSAGE_DEDUPE_MS) seenMessages.delete(key);
+    }
+    while (seenMessages.size > 2000) seenMessages.delete(seenMessages.keys().next().value);
+  }
+  return true;
+}
+
 async function start() {
   fs.mkdirSync(settings.sessionDir, { recursive: true });
   const { state, saveCreds } = await useMultiFileAuthState(settings.sessionDir);
@@ -227,12 +248,18 @@ async function start() {
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     for (const msg of messages) {
-      // Accept live messages, plus your own recent messages synced from your phone.
-      const age = Date.now() / 1000 - Number(String(msg.messageTimestamp || 0));
-      if (type !== 'notify' && !(type === 'append' && msg.key.fromMe && age < 60)) continue;
+      // Live notify messages are normal. Also accept fresh append messages from
+      // either side of a DM; older append history is deliberately ignored.
+      const timestamp = Number(msg.messageTimestamp?.low ?? msg.messageTimestamp) || 0;
+      const age = timestamp ? Date.now() / 1000 - timestamp : Infinity;
+      const live = type === 'notify' || (type === 'append' && age >= 0 && age < 60);
+      if (!live || !msg.message || !firstDelivery(msg)) continue;
+
+      const from = msg.key.remoteJid;
+      const text = getText(msg.message);
       log.info(
-        `[MSG] type=${type} from=${msg.key.remoteJid} fromMe=${!!msg.key.fromMe} ` +
-          `text="${getText(msg.message).slice(0, 40)}"`
+        `[MSG] type=${type} from=${from} fromMe=${!!msg.key.fromMe} ` +
+          `text="${text.slice(0, 40)}"`
       );
       if (settings.autoRead && !msg.key.fromMe) sock.readMessages([msg.key]).catch(() => {});
       // Not awaited: each message is handled on its own, so one slow command
