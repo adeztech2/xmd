@@ -1,20 +1,19 @@
-// AI commands.
-// The owner must set ONE of these in the server environment (Render > Environment):
-//   ANTHROPIC_API_KEY   (uses Claude; optional AI_MODEL, default claude-haiku-5-5)
-//   OPENAI_API_KEY      (any OpenAI-compatible service; optional OPENAI_BASE_URL and AI_MODEL)
+// AI commands. Configure one provider key in the server environment:
+// ANTHROPIC_API_KEY, GROQ_API_KEY, or OPENAI_API_KEY.
+// AI_MODEL is optional and overrides the provider's default model.
 const { log } = require('../logger');
 
-const MAX_PROMPT = 2000; // characters accepted from the user
-const MAX_REPLY = 3500; // WhatsApp-friendly reply length
-const HISTORY_MESSAGES = 8; // remembered messages per chat (4 questions + 4 answers)
+const MAX_PROMPT = 2000;
+const MAX_REPLY = 3500;
+const HISTORY_MESSAGES = 8;
 const COOLDOWN_MS = 5000;
 
 const BASE_SYSTEM =
   'You are a helpful assistant inside a WhatsApp bot. Keep answers clear and short ' +
   '(under about 200 words unless asked for more). Use plain text: no markdown headings or tables.';
 
-const history = new Map(); // chat -> [{ role, content }]
-const lastUse = new Map(); // sender -> time of last request
+const history = new Map();
+const lastUse = new Map();
 
 async function callAI(system, messages) {
   const signal = AbortSignal.timeout(60000);
@@ -40,6 +39,23 @@ async function callAI(system, messages) {
     return (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
   }
 
+  // Groq uses the OpenAI-compatible chat-completions format.
+  if (process.env.GROQ_API_KEY) {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      body: JSON.stringify({
+        model: process.env.AI_MODEL || 'llama-3.3-70b-versatile',
+        max_tokens: 700,
+        messages: [{ role: 'system', content: system }, ...messages],
+      }),
+      signal,
+    });
+    if (!res.ok) throw new Error(`AI ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    const data = await res.json();
+    return (data.choices?.[0]?.message?.content || '').trim();
+  }
+
   if (process.env.OPENAI_API_KEY) {
     const base = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
     const res = await fetch(`${base}/chat/completions`, {
@@ -60,14 +76,12 @@ async function callAI(system, messages) {
   throw new Error('no_key');
 }
 
-// Text of the message the user replied to, if any.
 const quotedText = (msg) => {
   const m = msg.message?.ephemeralMessage?.message || msg.message;
   const q = m?.extendedTextMessage?.contextInfo?.quotedMessage;
   return q?.conversation || q?.extendedTextMessage?.text || q?.imageMessage?.caption || q?.videoMessage?.caption || '';
 };
 
-// Shared flow: checks, asks the AI, replies. remember = keep chat history.
 async function ask({ sock, from, sender, reply }, system, prompt, remember = false) {
   const text = String(prompt || '').trim();
   if (!text) return;
@@ -84,24 +98,23 @@ async function ask({ sock, from, sender, reply }, system, prompt, remember = fal
     const answer = await callAI(system, messages);
     if (!answer) return reply('The AI gave no answer. Try rephrasing.');
 
-    if (remember) {
-      history.set(from, [...messages, { role: 'assistant', content: answer }].slice(-HISTORY_MESSAGES));
-    }
+    if (remember) history.set(from, [...messages, { role: 'assistant', content: answer }].slice(-HISTORY_MESSAGES));
     await reply(answer.length > MAX_REPLY ? answer.slice(0, MAX_REPLY) + '…' : answer);
   } catch (e) {
     if (e.message === 'no_key') {
-      return reply('AI is not set up yet. The owner must add ANTHROPIC_API_KEY (or OPENAI_API_KEY) in the server environment variables.');
+      return reply('AI is not configured. Set ANTHROPIC_API_KEY, GROQ_API_KEY, or OPENAI_API_KEY in the server environment.');
     }
     log.error('AI request failed:', e);
-    await reply('The AI could not answer right now. Try again in a moment.');
+    await reply('The AI could not answer right now. Check the configured provider key/model and try again.');
   }
 }
 
 module.exports = [
   {
     name: 'ai',
-    aliases: ['ask', 'chat', 'gpt', 'claude'],
+    aliases: ['ask', 'chat', 'gpt', 'claude', 'gemini', 'groq'],
     description: 'Ask the AI anything (it remembers the last few messages)',
+    category: 'ai',
     run: async (ctx) => {
       const q = ctx.text || quotedText(ctx.msg);
       if (!q) return ctx.reply(`Use: ${ctx.prefix}ai <your question>\nYou can also reply to a message with ${ctx.prefix}ai`);
@@ -112,6 +125,7 @@ module.exports = [
     name: 'aireset',
     aliases: ['newchat', 'clearai'],
     description: 'Forget the AI conversation in this chat',
+    category: 'ai',
     run: async ({ from, reply }) => {
       history.delete(from);
       await reply('AI conversation cleared. Starting fresh.');
@@ -121,13 +135,12 @@ module.exports = [
     name: 'translate',
     aliases: ['tr'],
     description: 'Translate text: translate french | hello',
+    category: 'ai',
     run: async (ctx) => {
       const [langPart, ...rest] = ctx.text.split('|');
       const lang = (langPart || '').trim();
       const body = rest.join('|').trim() || quotedText(ctx.msg);
-      if (!lang || !body) {
-        return ctx.reply(`Use: ${ctx.prefix}translate <language> | <text>\nor reply to a message with ${ctx.prefix}translate <language>`);
-      }
+      if (!lang || !body) return ctx.reply(`Use: ${ctx.prefix}translate <language> | <text>\nor reply to a message with ${ctx.prefix}translate <language>`);
       return ask(ctx, `${BASE_SYSTEM} Translate the user's text into ${lang}. Reply with only the translation.`, body);
     },
   },
@@ -135,6 +148,7 @@ module.exports = [
     name: 'summarize',
     aliases: ['summary', 'tldr'],
     description: 'Summarize a text (or the message you reply to)',
+    category: 'ai',
     run: async (ctx) => {
       const body = ctx.text || quotedText(ctx.msg);
       if (!body) return ctx.reply(`Use: ${ctx.prefix}summarize <text>\nor reply to a message with ${ctx.prefix}summarize`);
@@ -145,6 +159,7 @@ module.exports = [
     name: 'explain',
     aliases: ['eli5'],
     description: 'Explain something in simple words',
+    category: 'ai',
     run: async (ctx) => {
       const body = ctx.text || quotedText(ctx.msg);
       if (!body) return ctx.reply(`Use: ${ctx.prefix}explain <topic>`);
@@ -153,8 +168,9 @@ module.exports = [
   },
   {
     name: 'code',
-    aliases: ['coder'],
+    aliases: ['coder', 'aicode'],
     description: 'Get a short code answer',
+    category: 'ai',
     run: async (ctx) => {
       const body = ctx.text || quotedText(ctx.msg);
       if (!body) return ctx.reply(`Use: ${ctx.prefix}code <what you want, e.g. python function to reverse a string>`);
@@ -165,6 +181,7 @@ module.exports = [
     name: 'grammar',
     aliases: ['fix', 'proofread'],
     description: 'Fix spelling and grammar',
+    category: 'ai',
     run: async (ctx) => {
       const body = ctx.text || quotedText(ctx.msg);
       if (!body) return ctx.reply(`Use: ${ctx.prefix}grammar <text>\nor reply to a message with ${ctx.prefix}grammar`);
@@ -175,6 +192,7 @@ module.exports = [
     name: 'rewrite',
     aliases: ['polish'],
     description: 'Rewrite text more clearly and politely',
+    category: 'ai',
     run: async (ctx) => {
       const body = ctx.text || quotedText(ctx.msg);
       if (!body) return ctx.reply(`Use: ${ctx.prefix}rewrite <text>`);
